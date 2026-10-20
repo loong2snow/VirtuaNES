@@ -1,0 +1,231 @@
+#define	INITGUID
+#define	WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <windowsx.h>
+#include <commctrl.h>
+#include <crtdbg.h>
+
+#include <string>
+using namespace std;
+
+#include "DebugOut.h"
+#include "VirtuaNESres.h"
+
+#include "App.h"
+#include "Registry.h"
+#include "Pathlib.h"
+#include "MMTimer.h"
+
+#include "Wnd.h"
+#include "WndHook.h"
+#include "MainFrame.h"
+#include "Plugin.h"
+#include "Config.h"
+#include "Recent.h"
+
+#include "DirectDraw.h"
+#include "DirectSound.h"
+#include "DirectInput.h"
+
+#include "SimpleVirusChecker.h"
+
+INT WINAPI WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, INT nCmdShow )
+{
+#if	_DEBUG
+	// メモリリーク検出
+	int	Flag = _CrtSetDbgFlag( _CRTDBG_REPORT_FLAG );
+	Flag |= _CRTDBG_LEAK_CHECK_DF;
+	Flag &= ~_CRTDBG_CHECK_ALWAYS_DF;
+	_CrtSetDbgFlag( Flag );
+#endif
+
+	// 簡易ウィルスチェック
+	if( SimpleVirusChecker() > 0 ) {
+		if( ::GetUserDefaultLCID() == 0x0411 ) {
+			//if( ::MessageBoxW( NULL, L"このPCはウィルスプログラムに感染している可能性があります。\n"
+			//			L"危険ですのでなるべく早急にウィルスチェックを行って下さい。\n\n"
+			//			L"それでも実行しますか？", L"VirtuaNES 簡易ウィルスチェッカー", MB_ICONWARNING|MB_YESNO|MB_DEFBUTTON2 ) == IDNO )
+			if (::MessageBoxW(NULL,
+				L"\u3053\u306EPC\u306F\u30A6\u30A3\u30EB\u30B9\u30D7\u30ED\u30B0\u30E9\u30E0\u306B\u611F\u67D3\u3057\u3066\u3044\u308B\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002\n"
+				L"\u5371\u9669\u3067\u3059\u306E\u3067\u306A\u308B\u3079\u304F\u65E9\u6025\u306B\u30A6\u30A3\u30EB\u30B9\u30C1\u30A7\u30C3\u30AF\u3092\u884C\u3063\u3066\u4E0B\u3055\u3044\u3002\n\n"
+				L"\u305D\u308C\u3067\u3082\u5B9F\u884C\u3057\u307E\u3059\u304B\uff1f",
+				L"VirtuaNES \u7C21\u6613\u30A6\u30A3\u30EB\u30B9\u30C1\u30A7\u30C3\u30AB\u30FC",
+				MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDNO)
+				return	-1L;
+		} else {
+			if( ::MessageBoxW( NULL, L"This PC may be infected with a virus program!!!\n"
+						L"Should become danger, and please do a check to it immediately!!!\n\n"
+						L"Do execute even it?", L"VirtuaNES simple virus checker", MB_ICONWARNING|MB_YESNO|MB_DEFBUTTON2 ) == IDNO )
+				return	-1L;
+		}
+	}
+
+	// メインフレームウインドウオブジェクト
+	CMainFrame	MainFrame;
+
+	// Mutex
+	HANDLE	hMutex = NULL;
+
+	// アプリケーションインスタンス等の設定
+	CHAR	szPath[ _MAX_PATH ];
+	GetModuleFileName( hInstance, szPath, sizeof(szPath) );
+	string	ModulePath = CPathlib::SplitPath( szPath );
+	CApp::SetModulePath( ModulePath.c_str() );
+	DEBUGOUT( "Module Path:\"%s\"\n", ModulePath.c_str() );
+
+	CApp::SetInstance( hInstance );
+	CApp::SetPrevInstance( hPrevInstance );
+	CApp::SetCmdLine( lpCmdLine );
+	CApp::SetCmdShow( nCmdShow );
+
+//DEBUGOUT( "ThreadID:%08X\n", ::GetCurrentThreadId() );
+
+//	CRegistry::SetRegistryKey( "Emulators\\VirtuaNES" );
+	CRegistry::SetRegistryKey( "VirtuaNES.ini" );
+
+	if( !CPlugin::FindPlugin( CApp::GetModulePath() ) ) {
+		::MessageBox( NULL, "Language plug-in is not found.", "VirtuaNES", MB_ICONERROR|MB_OK );
+		goto	_Error_Exit;
+	}
+	DEBUGOUT( "Plugin Path:\"%s\"\n", CPlugin::GetPluginPath() );
+	DEBUGOUT( "Language   :\"%s\"\n", CPlugin::GetPluginLanguage() );
+	DEBUGOUT( "LCID       :\"%d\" \"0x%04X\"\n", CPlugin::GetPluginLocaleID(), CPlugin::GetPluginLocaleID() );
+
+	HINSTANCE hPlugin;
+	if( !(hPlugin = CPlugin::LoadPlugin()) ) {
+		::MessageBox( NULL, "Language plug-in load failed.", "VirtuaNES", MB_ICONERROR|MB_OK );
+		goto	_Error_Exit;
+	}
+	CApp::SetPlugin( hPlugin );
+
+	::InitCommonControls();
+
+	// 設定のロード
+	CRegistry::SetRegistryKey( "VirtuaNES.ini" );
+	Config.Load();
+	CRecent::Load();
+
+	// 二重起動の防止
+	hMutex = ::CreateMutex( NULL, FALSE, VIRTUANES_MUTEX );
+	if( ::GetLastError() == ERROR_ALREADY_EXISTS ) {
+		::CloseHandle( hMutex );
+		if( Config.general.bDoubleExecute ) {
+			HWND	hWnd = ::FindWindow( VIRTUANES_WNDCLASS, NULL );
+//			HWND	hWnd = ::FindWindow( VIRTUANES_WNDCLASS, VIRTUANES_CAPTION );
+
+			CHAR	szTitle[256];
+			::GetWindowText( hWnd, szTitle, sizeof(szTitle)-1 );
+
+			// タイトルバーが同じかどうかチェック
+			if( ::strncmp( szTitle, VIRTUANES_CAPTION, ::strlen(VIRTUANES_CAPTION) ) == 0 ) {
+				// 起動していた方をフォアグラウンドにする
+				::SetForegroundWindow( hWnd );
+
+				// コマンドライン引数があるなら動作中のVirtuaNESのウインドウにファイル名
+				// メッセージを送りつけてそちらで動作させる
+				// (当然の様に対応バージョンでないとダメ)
+				if( ::strlen( lpCmdLine ) > 0 ) {
+					CHAR	szCmdLine[_MAX_PATH];
+					::strcpy( szCmdLine, lpCmdLine );
+					::PathUnquoteSpaces( szCmdLine );
+
+					COPYDATASTRUCT	cds;
+					cds.dwData = 0;
+					cds.lpData = (void*)szCmdLine;
+					cds.cbData = ::strlen(szCmdLine)+1; //  終端のNULLも送る
+					//  文字列送信
+					::SendMessage( hWnd, WM_COPYDATA, (WPARAM)NULL, (LPARAM)&cds );
+				}
+
+				// 終了
+				goto	_DoubleExecute_Exit;
+			}
+		}
+	}
+
+	if( !MainFrame.Create(NULL) )
+		goto	_Error_Exit;
+	DEBUGOUT( "CreateWindow ok.\n" );
+
+	// メインウインドウの表示
+	::ShowWindow( CApp::GetHWnd(), CApp::GetCmdShow() );
+	::UpdateWindow( CApp::GetHWnd() );
+
+	// フック
+	CWndHook::Initialize();
+
+	// ランチャー同時起動
+	if( Config.general.bStartupLauncher ) {
+		::PostMessage( CApp::GetHWnd(), WM_COMMAND, ID_LAUNCHER, 0 );
+	}
+
+	// コマンドライン
+	if( ::strlen( lpCmdLine ) > 0 ) {
+		LPSTR	pCmd = lpCmdLine;
+		if( lpCmdLine[0] == '"' ) {	// Shell execute!!
+			lpCmdLine++;
+			if( lpCmdLine[::strlen( lpCmdLine )-1] == '"' ) {
+				lpCmdLine[::strlen( lpCmdLine )-1] = '\0';
+			}
+		}
+	}
+
+	if( ::strlen( lpCmdLine ) > 0 ) {
+		::PostMessage( CApp::GetHWnd(), WM_VNS_COMMANDLINE, 0, (LPARAM)lpCmdLine );
+	}
+
+	MSG	msg;
+	BOOL	bRet;
+	while( (bRet = ::GetMessage( &msg, NULL, 0, 0 )) != 0 ) {
+		// エラー？
+		if( bRet == -1 )
+			break;
+		// メインウインドウのメッセージフィルタリング
+		if( CApp::GetHWnd() == msg.hwnd ) {
+			//CWnd* pWnd = (CWnd*)::GetWindowLong( msg.hwnd, GWLP_USERDATA );
+			CWnd* pWnd = (CWnd*)::GetWindowLongPtr(msg.hwnd, GWLP_USERDATA);
+			if( pWnd ) {
+				if( pWnd->PreTranslateMessage( &msg ) )
+					continue;
+			}
+		}
+		if( CWndList::IsDialogMessage( &msg ) )
+			continue;
+		::TranslateMessage( &msg );
+		::DispatchMessage( &msg );
+	}
+	// フック
+	CWndHook::Release();
+
+	// 設定の保存
+	CRegistry::SetRegistryKey( "VirtuaNES.ini" );
+	Config.Save();
+	CRecent::Save();
+
+	// DirectX系破棄
+	DirectDraw.ReleaseDDraw();
+	DirectSound.ReleaseDSound();
+	DirectInput.ReleaseDInput();
+
+	if( hMutex )
+		::ReleaseMutex( hMutex );
+	CLOSEHANDLE( hMutex );
+
+_DoubleExecute_Exit:
+	::FreeLibrary( CApp::GetPlugin() );
+
+	return	msg.wParam;
+
+_Error_Exit:
+	// DirectX系破棄
+	DirectDraw.ReleaseDDraw();
+	DirectSound.ReleaseDSound();
+	DirectInput.ReleaseDInput();
+
+	if( CApp::GetPlugin() ) {
+		::FreeLibrary( CApp::GetPlugin() );
+	}
+
+	return	-1;
+}
+
